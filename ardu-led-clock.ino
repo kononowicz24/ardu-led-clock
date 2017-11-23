@@ -17,9 +17,12 @@
 
 #include <EEPROM.h>
 
+#include <SPI.h>
+#include "RF24.h"
+
 #include <vector>
 
-#define DEFAULT_MODES 4
+#define DEFAULT_MODES 5
 #define DISPLAY_HR_MIN 0
 #define DISPLAY_SEC 1
 #define ALTERNATE_HR_MIN_SEC 2
@@ -29,6 +32,9 @@
 #define ALARM_SET_FIRE 33
 #define ALARMS_SHOW_ENABLED 37
 #define ALARMS_SHOW_DISABLED 38
+#define SYNC_SET 4
+#define SYNC_OFFSET 41
+#define SYNC_ACCEPT 42
 #define DELAY_ALTERNATE 2500UL
 #define DELAY_DASHES 700UL
 #define RECV_PIN A0
@@ -50,6 +56,10 @@ bool alarmFired = false;
 bool alarmTimeout = false;
 
 RtcDS1307<TwoWire> Rtc(Wire);
+
+bool radioNumber = 1;
+RF24 radio(9,10);
+byte addresses[][6] = {"1Node","2Node"};
 
 class Alarm {
   int HH;
@@ -195,10 +205,78 @@ void setup ()
     mySerial.print(mins);
     mySerial.print(":");
     mySerial.println(secs);
+
+    radio.begin();
+    radio.setPALevel(RF24_PA_LOW);
+
+  // Open a writing and reading pipe on each radio, with opposite addresses
+    if(radioNumber){
+      radio.openWritingPipe(addresses[1]);
+      radio.openReadingPipe(1,addresses[0]);
+    }else{
+      radio.openWritingPipe(addresses[0]);
+      radio.openReadingPipe(1,addresses[1]);
+    }
+    radio.startListening();
+    mySerial.println(F("end of setup"));
 }
 
+struct query {
+  char co;
+  byte hh;
+  byte mm;
+  byte ss;
+};
+
+bool syncTime() {
+  mySerial.println("synctime1");
+  radio.stopListening();    
+  mySerial.println(F("Now sending"));
+
+  unsigned long start_time = micros();                           // Take the time, and send it.  This will block until complete
+  query request; request.co='t';
+  if (!radio.write( &request, sizeof(query) )){
+     mySerial.println(F("failed"));
+  } else mySerial.print(F("Sent "));
+
+  radio.startListening();                                    // Now, continue listening
+    
+  unsigned long started_waiting_at = micros();               // Set up a timeout period, get the current microseconds
+  boolean timeout = false;                                   // Set up a variable to indicate if a response was received or not
+
+  while ( ! radio.available() ){                             // While nothing is received
+    if (micros() - started_waiting_at > 200000 ){            // If waited longer than 200ms, indicate timeout and exit while loop
+        timeout = true;
+        break;
+    }
+  }
+
+  if ( timeout ){                                             // Describe the results
+      mySerial.println(F("Failed, response timed out."));
+      return false;
+  }else{
+      query response; query result;                                 // Grab the response, compare, and send to debugging spew
+      radio.read( &response, sizeof(query) );
+      mySerial.print(F(", Got response "));
+      mySerial.println(response.co);
+      delay(3995);
+      if (response.co == 'o') {
+      // Spew it
+        while (radio.available()) {
+          radio.read(&result, sizeof(query) );
+        }
+        mySerial.println(result.co);
+        mySerial.println(result.mm);
+      }
+  }
+  mySerial.println("synctime2");
+  return true;
+}
+bool synced=false;
 void loop () 
 {
+  //mySerial.println("loop");
+  //mySerial.println(mode);
     //if (!Rtc.IsDateTimeValid()) 
     //{
         // Common Cuases:
@@ -209,6 +287,8 @@ void loop ()
     RtcDateTime now = Rtc.GetDateTime();
     switch (mode) {
       case DISPLAY_HR_MIN: {
+        synced=false;
+        //mySerial.print(".");
         int hrs = now.Hour();
         int mins = now.Minute();
         hours.setNumber(hrs, 0);
@@ -279,7 +359,6 @@ void loop ()
           minutes.setNumber(mins, 1);
           hours.refreshDisplay();
           minutes.refreshDisplay(); // Must run repeatedly
-        break;
         } else {
           int hrs = 100;
           int mins = 100;
@@ -288,22 +367,52 @@ void loop ()
           hours.refreshDisplay();
           minutes.refreshDisplay();
         }
-          
         break;
       }
+      case SYNC_SET: {
+        synced=false;
+        int hrs = 54;
+        int mins=100;
+        hours.setNumber(hrs, 0);
+        minutes.setNumber(mins, 1);
+        hours.refreshDisplay();
+        minutes.refreshDisplay();
+        break;
+      }
+      case SYNC_OFFSET: {
+        //mySerial.print("!");
+        if (!synced)  synced = syncTime();
+        else {
+          unsigned long currUpTime = millis();
+          if (currUpTime % DELAY_DASHES == currUpTime % (2* DELAY_DASHES)) {
+            int hrs=54;
+            hours.setNumber(hrs, 0);
+            hours.refreshDisplay();
+          } else {
+            int hrs = 54;
+            int mins=100;
+            hours.setNumber(hrs, 0);
+            minutes.setNumber(mins, 1);
+            hours.refreshDisplay();
+            minutes.refreshDisplay();
+          }
+        }
+        break;
+      }
+      
       default: {
         mode=DISPLAY_HR_MIN;
       }
     }
+    
     if (irrecv.decode(&results)) {
       //mySerial.println(results.value, HEX);
-      if (results.value == 0x7121)
-      {
+      if (results.value == 0x7121) {
         //mySerial.println(mode);
         if (mode > DEFAULT_MODES) mode = DEFAULT_MODES-1;
         mode++;
         mode%=DEFAULT_MODES;
-        //mySerial.println(mode);
+        mySerial.println(mode);
       }
       if (mode == ALARM_SET_FIRE) {
         switch (results.value) {
@@ -381,8 +490,12 @@ void loop ()
               break;
             }
           }
+      } else
+      if (mode == SYNC_SET) {
+        if (results.value==0x1421) {
+          mode = SYNC_OFFSET;
+          }
       }
-      
       irrecv.resume(); // Receive the next value
     }
 }
