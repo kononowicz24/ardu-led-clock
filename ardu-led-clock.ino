@@ -223,9 +223,8 @@ void setup ()
 
 struct query {
   char co;
-  byte hh;
-  byte mm;
-  byte ss;
+  char date[12];
+  char hour[9];
 };
 
 bool syncTime() {
@@ -266,7 +265,8 @@ bool syncTime() {
           radio.read(&result, sizeof(query) );
         }
         mySerial.println(result.co);
-        mySerial.println(result.mm);
+        mySerial.println(result.date);
+        mySerial.println(result.hour);
       }
   }
   mySerial.println("synctime2");
